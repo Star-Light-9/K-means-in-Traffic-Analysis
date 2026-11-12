@@ -23,9 +23,16 @@
  *   4. rank 0 gathers the labels and merges local clusters that touch
  *      across strip borders with union-find
  *
+ * All settings are read from config.ini ([paths] and [dbscan] sections).
+ *
  * Usage:
- *   mpirun -np P ./dbscan trajectories.csv outdir [eps_pos] [eps_vel]
- *                         [minpts] [balance] [reps] [max_frames]
+ *   mpirun -n 4 ./dbscan                 (uses ./config.ini)
+ *   mpirun -n 4 ./dbscan my_config.ini
+ *   mpirun -n 4 ./dbscan config.ini reps=3 split=equal out_dir=bench/p4
+ * Windows (MS-MPI):  mpiexec -n 4 dbscan.exe
+ *
+ * Any key=value given after the config path overrides the file.
+ * The number of processes is always the -n given to mpirun / mpiexec.
  */
 
 #include <stdio.h>
@@ -33,6 +40,14 @@
 #include <string.h>
 #include <math.h>
 #include <mpi.h>
+
+#ifdef _WIN32
+#include <direct.h>
+#define MAKE_DIR(p) _mkdir(p)
+#else
+#include <sys/stat.h>
+#define MAKE_DIR(p) mkdir((p), 0777)
+#endif
 
 #define NOISE (-1)
 #define UNVISITED (-2)
@@ -619,6 +634,10 @@ static int load_csv(
                    &s, &i, &px, &py, &pvx, &pvy, &spd) < 6)
             continue;
 
+        /* skip SUMO's "no position" placeholder (about -1073741824) */
+        if (fabs(px) > 1e7 || fabs(py) > 1e7)
+            continue;
+
         if ((size_t)n == cap)
         {
             cap *= 2;
@@ -650,6 +669,151 @@ static int load_csv(
 }
 
 /* ------------------------------------------------------------------ */
+/* config.ini                                                          */
+/* ------------------------------------------------------------------ */
+
+typedef struct
+{
+    char data_dir[512];
+    char out_dir[512];
+    int reps;
+    int max_frames;
+} Settings;
+
+static void trim(char *s)
+{
+    char *start = s;
+
+    while (*start == ' ' || *start == '\t')
+        start++;
+
+    size_t len = strlen(start);
+
+    while (len > 0 && (start[len - 1] == ' ' || start[len - 1] == '\t' ||
+                       start[len - 1] == '\r' || start[len - 1] == '\n'))
+        len--;
+
+    memmove(s, start, len);
+    s[len] = '\0';
+}
+
+/* section == NULL means "any section" (used for command-line overrides) */
+static void apply_setting(
+    Settings *st, const char *section, const char *key, const char *val)
+{
+    int any = (section == NULL);
+
+    if (any || strcmp(section, "paths") == 0)
+    {
+        if (strcmp(key, "data_dir") == 0)
+        {
+            strncpy(st->data_dir, val, sizeof(st->data_dir) - 1);
+            st->data_dir[sizeof(st->data_dir) - 1] = '\0';
+        }
+        else if (strcmp(key, "out_dir") == 0)
+        {
+            strncpy(st->out_dir, val, sizeof(st->out_dir) - 1);
+            st->out_dir[sizeof(st->out_dir) - 1] = '\0';
+        }
+    }
+
+    if (any || strcmp(section, "dbscan") == 0)
+    {
+        if (strcmp(key, "eps_pos") == 0) EPS_POS = atof(val);
+        else if (strcmp(key, "eps_vel") == 0) EPS_VEL = atof(val);
+        else if (strcmp(key, "min_pts") == 0) MINPTS = atoi(val);
+        else if (strcmp(key, "reps") == 0) st->reps = atoi(val);
+        else if (strcmp(key, "max_steps") == 0) st->max_frames = atoi(val);
+        else if (strcmp(key, "split") == 0)
+            BALANCE = (strcmp(val, "equal") == 0 ||
+                       strcmp(val, "equal-width") == 0 ||
+                       strcmp(val, "0") == 0) ? 0 : 1;
+    }
+}
+
+/* returns 0 on success, -1 if the file cannot be opened */
+static int read_ini(const char *path, Settings *st)
+{
+    FILE *fp = fopen(path, "r");
+
+    if (fp == NULL)
+        return -1;
+
+    char line[1024];
+    char section[64] = "";
+
+    while (fgets(line, sizeof(line), fp))
+    {
+        trim(line);
+
+        if (line[0] == '\0' || line[0] == '#' || line[0] == ';')
+            continue;
+
+        if (line[0] == '[')
+        {
+            char *close = strchr(line, ']');
+
+            if (close != NULL)
+            {
+                *close = '\0';
+                strncpy(section, line + 1, sizeof(section) - 1);
+                section[sizeof(section) - 1] = '\0';
+                trim(section);
+
+                for (char *c = section; *c; c++)
+                    if (*c >= 'A' && *c <= 'Z')
+                        *c = (char)(*c - 'A' + 'a');
+            }
+
+            continue;
+        }
+
+        char *eq = strchr(line, '=');
+
+        if (eq == NULL)
+            continue;
+
+        *eq = '\0';
+
+        char *key = line;
+        char *val = eq + 1;
+
+        trim(key);
+        trim(val);
+
+        apply_setting(st, section, key, val);
+    }
+
+    fclose(fp);
+    return 0;
+}
+
+static int is_absolute(const char *p)
+{
+    return p[0] == '/' || p[0] == '\\' || (p[0] != '\0' && p[1] == ':');
+}
+
+/* relative paths are relative to the folder that holds the config file */
+static void resolve_path(
+    const char *cfgpath, const char *p, char *out, size_t cap)
+{
+    if (is_absolute(p))
+    {
+        snprintf(out, cap, "%s", p);
+        return;
+    }
+
+    const char *slash1 = strrchr(cfgpath, '/');
+    const char *slash2 = strrchr(cfgpath, '\\');
+    const char *slash = slash1 > slash2 ? slash1 : slash2;
+
+    if (slash == NULL)
+        snprintf(out, cap, "%s", p);
+    else
+        snprintf(out, cap, "%.*s/%s", (int)(slash - cfgpath), cfgpath, p);
+}
+
+/* ------------------------------------------------------------------ */
 /* main                                                                */
 /* ------------------------------------------------------------------ */
 
@@ -661,18 +825,68 @@ int main(int argc, char **argv)
     MPI_Comm_rank(MPI_COMM_WORLD, &rank);
     MPI_Comm_size(MPI_COMM_WORLD, &size);
 
-    const char *input = argc > 1 ? argv[1] : "trajectories.csv";
-    const char *outdir = argc > 2 ? argv[2] : ".";
+    /* ---- settings: config file, then key=value overrides ---- */
+    const char *cfgpath = "config.ini";
+    int first_override = 1;
 
-    if (argc > 3) EPS_POS = atof(argv[3]);
-    if (argc > 4) EPS_VEL = atof(argv[4]);
-    if (argc > 5) MINPTS = atoi(argv[5]);
-    if (argc > 6) BALANCE = atoi(argv[6]);
+    if (argc > 1 && strchr(argv[1], '=') == NULL)
+    {
+        cfgpath = argv[1];
+        first_override = 2;
+    }
 
-    int reps = argc > 7 ? atoi(argv[7]) : 1;
-    int max_frames = argc > 8 ? atoi(argv[8]) : 0;
+    Settings st;
+    strcpy(st.data_dir, "data");
+    st.out_dir[0] = '\0';
+    st.reps = 1;
+    st.max_frames = 0;
 
-    if (reps < 1) reps = 1;
+    if (read_ini(cfgpath, &st) != 0 && rank == 0)
+        printf("Note: %s not found, using built-in defaults "
+               "(run from the folder that contains config.ini, "
+               "or pass its path).\n", cfgpath);
+
+    for (int a = first_override; a < argc; a++)
+    {
+        char tmp[1024];
+        snprintf(tmp, sizeof(tmp), "%s", argv[a]);
+
+        char *eq = strchr(tmp, '=');
+
+        if (eq == NULL)
+            continue;
+
+        *eq = '\0';
+        trim(tmp);
+        trim(eq + 1);
+
+        /* accept "dbscan.reps=3" as well as "reps=3" */
+        char *key = strchr(tmp, '.') ? strchr(tmp, '.') + 1 : tmp;
+
+        apply_setting(&st, NULL, key, eq + 1);
+    }
+
+    int reps = st.reps < 1 ? 1 : st.reps;
+    int max_frames = st.max_frames;
+
+    if (EPS_POS <= 0.0 || EPS_VEL <= 0.0 || MINPTS < 1)
+    {
+        if (rank == 0)
+            fprintf(stderr, "eps_pos, eps_vel must be > 0 and min_pts >= 1\n");
+
+        MPI_Abort(MPI_COMM_WORLD, 1);
+    }
+
+    char data_dir_full[1100], out_dir_full[1100], input_buf[1200];
+
+    resolve_path(cfgpath, st.data_dir, data_dir_full, sizeof(data_dir_full));
+    resolve_path(cfgpath,
+                 st.out_dir[0] ? st.out_dir : st.data_dir,
+                 out_dir_full, sizeof(out_dir_full));
+    snprintf(input_buf, sizeof(input_buf), "%s/trajectories.csv", data_dir_full);
+
+    const char *input = input_buf;
+    const char *outdir = out_dir_full;
 
     int *steps = NULL, *ids = NULL;
     double *X = NULL, *Y = NULL, *VX = NULL, *VY = NULL;
@@ -764,7 +978,7 @@ int main(int argc, char **argv)
         if (c > maxn) maxn = c;
     }
 
-    char path[1024];
+    char path[1300];
     FILE *fseq = NULL, *fpar = NULL;
     double *seq_ms = NULL;
     int *seq_cl = NULL;
@@ -774,6 +988,8 @@ int main(int argc, char **argv)
     /* ---------------- sequential baseline (rank 0 only) ---------------- */
     if (rank == 0)
     {
+        MAKE_DIR(outdir);   /* ignored if it already exists */
+
         snprintf(path, sizeof(path), "%s/clusters_seq.csv", outdir);
         fseq = fopen(path, "w");
 

@@ -11,12 +11,14 @@ and the original trajectories.csv, then:
   * marks a cluster as STUCK when that mean speed stays below
     --stuck-speed for at least --stuck-steps consecutive steps.
 
-Outputs (in --data-dir):
+Settings come from the [tracking] section of config.ini.
+
+Outputs (in data_dir):
     tracked_<mode>.csv        step,id,cluster,track,stuck      (per vehicle)
     cluster_stats_<mode>.csv  step,track,size,mean_speed,stuck (per cluster)
 
 Usage:
-    python track.py --data-dir data
+    python track.py
 """
 
 import argparse
@@ -25,6 +27,9 @@ from collections import Counter
 
 import numpy as np
 import pandas as pd
+from types import SimpleNamespace
+
+import config
 
 
 def track_clusters(df, stuck_speed, stuck_steps, min_jaccard=0.2):
@@ -128,12 +133,17 @@ def track_clusters(df, stuck_speed, stuck_steps, min_jaccard=0.2):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--data-dir", default="data")
-    ap.add_argument("--stuck-speed", type=float, default=2.0,
-                    help="mean cluster speed (m/s) below which it is slow")
-    ap.add_argument("--stuck-steps", type=int, default=3,
-                    help="consecutive slow steps before a cluster is stuck")
-    args = ap.parse_args()
+    ap.add_argument("--config", default=None,
+                    help="settings file (default: config.ini next to the scripts)")
+    cli = ap.parse_args()
+
+    cfg = config.load(cli.config)
+
+    args = SimpleNamespace(
+        data_dir=cfg.data_dir,
+        stuck_speed=cfg.float("tracking", "stuck_speed"),
+        stuck_steps=cfg.int("tracking", "stuck_steps"),
+    )
 
     traj = pd.read_csv(os.path.join(args.data_dir, "trajectories.csv"),
                        usecols=["step", "id", "speed"])

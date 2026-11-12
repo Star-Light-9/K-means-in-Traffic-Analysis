@@ -13,36 +13,49 @@ stretched by a common factor so that the sequential run lasts
 Cars are coloured by cluster, noise is grey, and clusters flagged as
 stuck get a black outline.
 
+Settings (duration, fps, window / GIF) come from the [replay] section of
+config.ini.
+
 Usage:
-    python replay.py --data-dir data
-    python replay.py --data-dir data --seq-duration 45 --fps 20
-    python replay.py --data-dir data --save replay.gif
-    python replay.py --data-dir data --png still.png --at 0.4
+    python replay.py
+    python replay.py --png still.png --at 0.4     (one still image)
 """
 
 import argparse
 import json
 import os
 import sys
+from types import SimpleNamespace
 
 import numpy as np
 import pandas as pd
 import matplotlib
 
+import config
+
 ap = argparse.ArgumentParser()
-ap.add_argument("--data-dir", default="data")
-ap.add_argument("--seq-duration", type=float, default=60.0,
-                help="seconds on screen for the sequential run")
-ap.add_argument("--fps", type=int, default=20)
-ap.add_argument("--save", default=None,
-                help="write an animation (.gif or .mp4) instead of a window")
+ap.add_argument("--config", default=None,
+                help="settings file (default: config.ini next to the scripts)")
 ap.add_argument("--png", default=None,
                 help="write one still image and exit")
 ap.add_argument("--at", type=float, default=0.5,
                 help="with --png: moment as a fraction of the sequential run")
-args = ap.parse_args()
+cli = ap.parse_args()
 
-if args.save or args.png:
+cfg = config.load(cli.config)
+
+args = SimpleNamespace(
+    data_dir=cfg.data_dir,
+    seq_duration=cfg.float("replay", "seq_duration"),
+    fps=cfg.int("replay", "fps"),
+    show_window=cfg.bool("replay", "show_window"),
+    make_gif=cfg.bool("replay", "make_gif"),
+    gif_name=cfg.str("replay", "gif_name"),
+    png=cli.png,
+    at=cli.at,
+)
+
+if args.png or (args.make_gif and not args.show_window):
     matplotlib.use("Agg")
 
 import matplotlib.pyplot as plt
@@ -209,29 +222,34 @@ if args.png:
 anim = FuncAnimation(fig, draw, frames=n_anim, interval=1000 / args.fps,
                      blit=False, repeat=False)
 
-# If this Python has no GUI toolkit (matplotlib falls back to "Agg"), a
-# window cannot be shown, so write a GIF instead.
-if not args.save:
-    no_window = {"agg", "pdf", "pgf", "ps", "svg", "cairo", "template"}
+no_window = {"agg", "pdf", "pgf", "ps", "svg", "cairo", "template"}
+window_possible = matplotlib.get_backend().lower() not in no_window
+want_gif = args.make_gif
 
-    if matplotlib.get_backend().lower() in no_window:
-        args.save = os.path.join(D, "replay.gif")
-        print("No window available (matplotlib backend: %s)."
-              % matplotlib.get_backend())
-        print("Writing %s instead. This can take a few minutes; for a quick "
-              "one use  --seq-duration 20 --fps 10" % args.save)
-        print("To get a live window, install a GUI toolkit: on Linux "
-              "'sudo apt install python3-tk', or try 'pip install PyQt6'.")
+if args.show_window and not window_possible:
+    print("No window available (matplotlib backend: %s)."
+          % matplotlib.get_backend())
+    print("To get a live window install a GUI toolkit: on Linux "
+          "'sudo apt install python3-tk', or try 'pip install PyQt6'.")
 
-if args.save:
-    if args.save.lower().endswith(".gif"):
-        from matplotlib.animation import PillowWriter
-        writer = PillowWriter(fps=args.fps)
-    else:
+    if not want_gif:
+        print("Writing the GIF instead.")
+        want_gif = True
+
+if want_gif:
+    gif_path = os.path.join(D, args.gif_name)
+    print("Writing %s (this can take a few minutes; lower seq_duration or "
+          "fps in config.ini to speed it up) ..." % gif_path)
+
+    if gif_path.lower().endswith(".mp4"):
         from matplotlib.animation import FFMpegWriter
         writer = FFMpegWriter(fps=args.fps)
+    else:
+        from matplotlib.animation import PillowWriter
+        writer = PillowWriter(fps=args.fps)
 
-    anim.save(args.save, writer=writer, dpi=90)
-    print("Wrote", args.save)
-else:
+    anim.save(gif_path, writer=writer, dpi=90)
+    print("Wrote", gif_path)
+
+if args.show_window and window_possible:
     plt.show()

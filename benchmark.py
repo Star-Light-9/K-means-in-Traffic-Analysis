@@ -1,22 +1,22 @@
 """
-benchmark.py - run dbscan with 1, 2, 4, 8 ... MPI processes and report
+benchmark.py - run dbscan with several MPI process counts and report
 speedup, efficiency and load imbalance. Optionally compares the two ways
-of cutting the map (count-balanced vs equal-width strips).
+of cutting the map (balanced vs equal-width strips).
+
+Settings come from config.ini: [benchmark], [mpi], [dbscan], [paths].
+It uses the trajectories already in data_dir (run run_sumo.py first).
 
 Usage:
-    python benchmark.py --input data/trajectories.csv
-    python benchmark.py --input data_big/trajectories.csv --procs 1 2 4 8 \
-                        --reps 3 --compare-split
+    python benchmark.py
 
-Windows (MS-MPI):  add  --mpirun mpiexec --exe dbscan.exe
-OpenMPI with more processes than cores: --mpi-extra --oversubscribe
-
-Writes benchmark_results.csv and benchmark.png next to --out-dir.
+Writes (in <data_dir>/bench):  benchmark_results.csv  and  benchmark.png
 """
 
 import argparse
 import os
+import platform
 import shlex
+import shutil
 import subprocess
 import sys
 
@@ -26,40 +26,58 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
+import config
+
+
+def find_launcher(name):
+    if name != "auto":
+        return name
+
+    for cand in ("mpirun", "mpiexec"):
+        if shutil.which(cand):
+            return cand
+
+    sys.exit("No mpirun / mpiexec found. Install MPI first (see README).")
+
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--input", default="data/trajectories.csv")
-    ap.add_argument("--exe", default="./dbscan")
-    ap.add_argument("--mpirun", default="mpirun")
-    ap.add_argument("--mpi-extra", default="",
-                    help='extra mpirun flags, e.g. "--oversubscribe"')
-    ap.add_argument("--procs", type=int, nargs="+", default=[1, 2, 4, 8])
-    ap.add_argument("--out-dir", default="bench")
-    ap.add_argument("--eps-pos", default="25")
-    ap.add_argument("--eps-vel", default="4")
-    ap.add_argument("--minpts", default="4")
-    ap.add_argument("--reps", default="3",
-                    help="repeat each step this many times and average")
-    ap.add_argument("--max-frames", default="0")
-    ap.add_argument("--compare-split", action="store_true",
-                    help="also run equal-width strips (BALANCE=0)")
-    args = ap.parse_args()
+    ap.add_argument("--config", default=None,
+                    help="settings file (default: config.ini next to the scripts)")
+    cli = ap.parse_args()
 
-    os.makedirs(args.out_dir, exist_ok=True)
+    cfg = config.load(cli.config)
 
-    splits = [1, 0] if args.compare_split else [1]
+    exe_name = "dbscan.exe" if platform.system() == "Windows" else "dbscan"
+    exe = os.path.join(config.HERE, exe_name)
+
+    if not os.path.isfile(exe):
+        sys.exit("%s not found. Build it first (see README), or run "
+                 "python run_dbscan.py once, which builds it." % exe_name)
+
+    launcher = find_launcher(cfg.str("mpi", "launcher"))
+    extra = shlex.split(cfg.str("mpi", "extra_args"))
+    procs = cfg.ints("benchmark", "processes")
+    reps = cfg.int("benchmark", "reps")
+
+    out_root = os.path.join(cfg.data_dir, "bench")
+    os.makedirs(out_root, exist_ok=True)
+
+    splits = [("balanced", 1), ("equal", 0)] \
+        if cfg.bool("benchmark", "compare_split") else [("balanced", 1)]
+
     rows = []
 
-    for bal in splits:
-        for p in args.procs:
-            out = os.path.join(args.out_dir, "p%d_bal%d" % (p, bal))
+    for split_name, _ in splits:
+        for p in procs:
+            out = os.path.join(out_root, "p%d_%s" % (p, split_name))
             os.makedirs(out, exist_ok=True)
 
-            cmd = ([args.mpirun, "-n", str(p)]
-                   + shlex.split(args.mpi_extra)
-                   + [args.exe, args.input, out, args.eps_pos, args.eps_vel,
-                      args.minpts, str(bal), args.reps, args.max_frames])
+            cmd = ([launcher, "-n", str(p)] + extra
+                   + [exe, cfg.path,
+                      "split=" + split_name,
+                      "reps=%d" % reps,
+                      "out_dir=" + out])
 
             print("running:", " ".join(cmd))
             res = subprocess.run(cmd, capture_output=True, text=True)
@@ -76,7 +94,7 @@ def main():
 
             rows.append({
                 "procs": p,
-                "split": "count-balanced" if bal else "equal-width",
+                "split": split_name,
                 "vehicles_per_step": t["n"].mean(),
                 "seq_total_ms": t["seq_ms"].sum(),
                 "par_total_ms": t["par_ms"].sum(),
@@ -85,21 +103,21 @@ def main():
 
     df = pd.DataFrame(rows)
 
-    # The sequential time is the same work in every run; use the fastest
+    # The sequential work is the same in every run; use the fastest
     # measurement as the reference so noise does not distort the speedup.
     ref = df["seq_total_ms"].min()
     df["seq_ref_ms"] = ref
     df["speedup"] = ref / df["par_total_ms"]
     df["efficiency_pct"] = 100.0 * df["speedup"] / df["procs"]
 
-    df.to_csv(os.path.join(args.out_dir, "benchmark_results.csv"), index=False)
+    df.to_csv(os.path.join(out_root, "benchmark_results.csv"), index=False)
 
     pd.set_option("display.width", 140)
     print()
     print(df.round(3).to_string(index=False))
 
     # ---------------- chart ----------------
-    colors = {"count-balanced": "#1f77b4", "equal-width": "#d95f02"}
+    colors = {"balanced": "#1f77b4", "equal": "#d95f02"}
     fig, ax = plt.subplots(1, 3, figsize=(14, 4.2))
 
     for name, g in df.groupby("split"):
@@ -112,7 +130,7 @@ def main():
     ax[0].set_ylabel("total time (ms)")
     ax[0].set_title("Total clustering time")
 
-    pmax = max(args.procs)
+    pmax = max(procs)
     ax[1].plot([1, pmax], [1, pmax], color="#999999", ls=":", label="ideal")
     ax[1].axhline(1.0, color="#555555", ls="--", lw=0.8)
     ax[1].set_ylabel("speedup vs sequential")
@@ -124,15 +142,16 @@ def main():
 
     for a in ax:
         a.set_xlabel("MPI processes")
-        a.set_xticks(args.procs)
+        a.set_xticks(procs)
         a.grid(alpha=0.25)
         a.legend(frameon=False)
 
     fig.suptitle("Parallel DBSCAN - %.0f vehicles per step"
                  % df["vehicles_per_step"].iloc[0])
     fig.tight_layout()
-    fig.savefig(os.path.join(args.out_dir, "benchmark.png"), dpi=150)
-    print("\nWrote", os.path.join(args.out_dir, "benchmark_results.csv"),
+    fig.savefig(os.path.join(out_root, "benchmark.png"), dpi=150)
+
+    print("\nWrote", os.path.join(out_root, "benchmark_results.csv"),
           "and benchmark.png")
 
 

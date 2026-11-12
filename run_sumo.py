@@ -2,7 +2,9 @@
 run_sumo.py - run a SUMO traffic simulation and record every vehicle's
 position and velocity at every step.
 
-Output (in --out-dir):
+All settings come from the [sumo] section of config.ini.
+
+Output (in data_dir from config.ini):
     trajectories.csv   step,id,x,y,vx,vy,speed
     network.json       road polylines for the background of the replay
 
@@ -10,8 +12,8 @@ Install SUMO first:   pip install eclipse-sumo traci sumolib
 (or the installer from https://sumo.dlr.de, then set SUMO_HOME)
 
 Usage:
-    python run_sumo.py --out-dir data                      # built-in grid city
-    python run_sumo.py --out-dir data --net pune.net.xml   # your own network
+    python run_sumo.py
+    python run_sumo.py --config other_config.ini
 
 Congestion is created on purpose: dense demand plus a few temporary
 "blockages" (one vehicle is held at speed 0, queues form behind it, then
@@ -26,6 +28,9 @@ import os
 import random
 import subprocess
 import sys
+from types import SimpleNamespace
+
+import config
 
 if os.environ.get("SUMO_HOME"):
     sys.path.append(os.path.join(os.environ["SUMO_HOME"], "tools"))
@@ -65,29 +70,31 @@ def make_grid_net(path, n, length):
 
 
 def main():
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--out-dir", default="data")
-    ap.add_argument("--net", default=None,
-                    help="existing .net.xml (default: generate a grid city)")
-    ap.add_argument("--grid", type=int, default=8,
-                    help="grid size when generating a network")
-    ap.add_argument("--grid-length", type=float, default=200.0)
-    ap.add_argument("--steps", type=int, default=400,
-                    help="recorded steps (after warm-up)")
-    ap.add_argument("--warmup", type=int, default=60,
-                    help="steps simulated but not recorded")
-    ap.add_argument("--initial", type=int, default=800,
-                    help="vehicles released at the start")
-    ap.add_argument("--flow", type=float, default=3.0,
-                    help="new vehicles per step (average)")
-    ap.add_argument("--jams", type=int, default=3,
-                    help="number of temporary blockages")
-    ap.add_argument("--jam-start", type=int, default=80,
-                    help="step (from recording start) of the first blockage")
-    ap.add_argument("--jam-gap", type=int, default=60)
-    ap.add_argument("--jam-duration", type=int, default=120)
-    ap.add_argument("--seed", type=int, default=1)
-    args = ap.parse_args()
+    ap = argparse.ArgumentParser(description=__doc__.split("\n")[1])
+    ap.add_argument("--config", default=None,
+                    help="settings file (default: config.ini next to the scripts)")
+    cli = ap.parse_args()
+
+    cfg = config.load(cli.config)
+    network = cfg.str("sumo", "network")
+
+    args = SimpleNamespace(
+        out_dir=cfg.data_dir,
+        net=None if network.lower() == "grid" else cfg.resolve(network),
+        grid=cfg.int("sumo", "grid_size"),
+        grid_length=cfg.float("sumo", "grid_length"),
+        steps=cfg.int("sumo", "steps"),
+        warmup=cfg.int("sumo", "warmup"),
+        initial=cfg.int("sumo", "initial_vehicles"),
+        flow=cfg.float("sumo", "flow"),
+        jams=cfg.int("sumo", "jams"),
+        jam_start=cfg.int("sumo", "jam_start"),
+        jam_gap=cfg.int("sumo", "jam_gap"),
+        jam_duration=cfg.int("sumo", "jam_duration"),
+        seed=cfg.int("sumo", "seed"),
+    )
+
+    print("Settings from", cfg.path)
 
     random.seed(args.seed)
     os.makedirs(args.out_dir, exist_ok=True)
