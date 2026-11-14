@@ -126,7 +126,7 @@ def main():
                  "--step-length", "1",
                  "--no-warnings", "true",
                  "--no-step-log", "true",
-                 "--time-to-teleport", "120",
+                 "--time-to-teleport", "-1",
                  "--seed", str(args.seed)])
 
     counter = 0

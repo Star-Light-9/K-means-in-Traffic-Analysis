@@ -65,6 +65,7 @@ D = args.data_dir
 
 traj = pd.read_csv(os.path.join(D, "trajectories.csv"),
                    usecols=["step", "id", "x", "y"])
+traj = traj[(traj["x"] > -1e6) & (traj["y"] > -1e6)] 
 timings = pd.read_csv(os.path.join(D, "timings.csv"))
 
 steps = timings["step"].to_numpy()
